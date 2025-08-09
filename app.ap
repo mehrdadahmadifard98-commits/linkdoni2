@@ -1,0 +1,111 @@
+import os
+import time
+import asyncio
+from aiogram import Bot, Dispatcher, executor, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from datetime import datetime, timedelta
+import aiohttp
+
+BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")  # مثلا: -1001234567890
+ZARINPAL_MERCHANT_ID = os.getenv("ZARINPAL_MERCHANT_ID")
+PAYMENT_CALLBACK_URL = os.getenv("PAYMENT_CALLBACK_URL")  # لینک بازگشت پس از پرداخت
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(bot)
+
+# ساعات کاری از 10 صبح تا 12 شب
+WORK_HOURS_START = 10
+WORK_HOURS_END = 24
+INTERVAL_MINUTES = 5
+
+# ذخیره سفارش‌ها در حافظه (برای نمونه)
+orders = {}
+
+def get_available_slots():
+    now = datetime.now()
+    slots = []
+    for day_offset in range(7):  # 7 روز هفته
+        day = now + timedelta(days=day_offset)
+        day_str = day.strftime("%A - %d/%m")
+        day_slots = []
+        for hour in range(WORK_HOURS_START, WORK_HOURS_END):
+            for minute in range(0, 60, INTERVAL_MINUTES):
+                slot_time = datetime(day.year, day.month, day.day, hour, minute)
+                if slot_time > now:
+                    day_slots.append(slot_time.strftime("%H:%M"))
+        slots.append((day_str, day_slots))
+    return slots
+
+@dp.message_handler(commands=["start", "help"])
+async def send_welcome(message: types.Message):
+    await message.answer("سلام! برای ثبت سفارش لینکدونی، /order رو بزن.")
+
+@dp.message_handler(commands=["order"])
+async def order_start(message: types.Message):
+    slots = get_available_slots()
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    for day_str, day_slots in slots:
+        keyboard.add(InlineKeyboardButton(day_str, callback_data=f"day_{day_str}"))
+    await message.answer("روز مورد نظر را انتخاب کنید:", reply_markup=keyboard)
+
+@dp.callback_query_handler(lambda c: c.data.startswith("day_"))
+async def day_selected(callback_query: types.CallbackQuery):
+    day_str = callback_query.data[4:]
+    # پیدا کردن ساعت‌های روز انتخاب شده
+    slots = get_available_slots()
+    times = []
+    for d, day_slots in slots:
+        if d == day_str:
+            times = day_slots
+            break
+    keyboard = InlineKeyboardMarkup(row_width=3)
+    for t in times[:12]:  # محدود به 12 ساعت اول برای راحتی
+        keyboard.insert(InlineKeyboardButton(t, callback_data=f"time_{day_str}_{t}"))
+    await bot.send_message(callback_query.from_user.id, f"ساعت مورد نظر در {day_str} را انتخاب کنید:", reply_markup=keyboard)
+    await callback_query.answer()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("time_"))
+async def time_selected(callback_query: types.CallbackQuery):
+    data = callback_query.data[5:]  # day_str و time جداست با _
+    try:
+        day_str, time_str = data.rsplit("_", 1)
+    except:
+        await callback_query.answer("خطا در انتخاب زمان", show_alert=True)
+        return
+
+    user_id = callback_query.from_user.id
+    orders[user_id] = {"day": day_str, "time": time_str}
+
+    # ساخت لینک پرداخت زرین پال (نمونه ساده)
+    amount = 10000  # تومان به صورت نمونه
+    description = f"پرداخت سفارش لینکدونی برای {day_str} ساعت {time_str}"
+    pay_link = f"https://zarinpal.com/pg/StartPay/{ZARINPAL_MERCHANT_ID}?amount={amount}&description={description}&callback={PAYMENT_CALLBACK_URL}"
+
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard.add(InlineKeyboardButton("پرداخت آنلاین", url=pay_link))
+
+    await bot.send_message(user_id,
+                           f"سفارش شما برای {day_str} ساعت {time_str} ثبت شد.\n"
+                           f"برای پرداخت روی لینک زیر کلیک کنید:",
+                           reply_markup=keyboard)
+    await callback_query.answer()
+
+async def scheduled_post():
+    await bot.wait_until_ready()
+    while True:
+        now = datetime.now()
+        if now.minute % INTERVAL_MINUTES == 0:
+            # برای نمونه یک پست ساده ارسال می‌کنیم
+            text = f"لینکدونی - اطلاعیه خودکار\nزمان: {now.strftime('%Y-%m-%d %H:%M')}"
+            await bot.send_message(CHANNEL_ID, text)
+            await asyncio.sleep(60)  # صبر 60 ثانیه تا ارسال مجدد
+        else:
+            await asyncio.sleep(10)
+
+if __name__ == "__main__":
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    loop = asyncio.get_event_loop()
+    loop.create_task(scheduled_post())
+    executor.start_polling(dp)
